@@ -9,7 +9,13 @@ export type ObservationKey =
   | "garment_category" | "silhouette" | "neckline" | "sleeves" | "length_category"
   | "design_details" | "color" | "fabric_appearance" | "construction_considerations";
 
+export type GarmentType = "dress" | "top" | "trousers" | "skirt" | "outerwear" | "other";
+/** A distinct garment the model sees in the image (a top and trousers are two garments). */
+export type DetectedGarment = { name: string; type: GarmentType };
+
 export type Observation = {
+  /** Which garment this observation describes (matches a DetectedGarment.name). */
+  piece: string;
   key: ObservationKey;
   label: string;
   value: string;
@@ -28,6 +34,8 @@ export type Question = {
   required: boolean;
   answer?: string;
   skipped?: boolean;
+  /** Carried over after the reference image was replaced; the designer must confirm it again. */
+  needsReview?: boolean;
   /** UI-only: the user chose "Something else" and is typing a custom answer. */
   custom?: boolean;
 };
@@ -38,6 +46,7 @@ export type Difference = { topic: string; reference_shows: string; client_wants:
 
 export type AnalysisResult = {
   summary: string;
+  garments: DetectedGarment[];
   observations: Observation[];
   missing_information: string[];
   differences: Difference[];
@@ -60,7 +69,17 @@ export type BriefData = {
   final_review_checklist: string[];
 };
 
-export type BriefForm = { image: string; thumb: string; description: string; garment: string; occasion: string };
+export type BriefForm = {
+  /** Data URL sent to the model. For reopened drafts this is only the small stored preview. */
+  image: string;
+  thumb: string;
+  /** SHA-256 of `image`; the server echoes it back so we can prove the analysis belongs to this image. */
+  imageHash: string;
+  imageSource: "original" | "preview";
+  description: string;
+  garment: string;
+  occasion: string;
+};
 
 export type SavedBrief = {
   id: string;
@@ -84,6 +103,8 @@ export type SavedBrief = {
   differences?: Difference[];
   /** Fingerprint of the answers/observations the brief was generated from (stale detection). */
   generatedFrom?: string;
+  imageHash?: string;
+  garments?: DetectedGarment[];
 };
 
 export type ApiOk<T> = { ok: true; provider: Provider; model: string | null; data: T };

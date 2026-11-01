@@ -1,5 +1,5 @@
 import { ALLOWED_IMAGE_TYPES, LIMITS, type AllowedImageType } from "./config";
-import type { AnalysisResult, ApiSource, BriefData, Confidence, Difference, Observation, ObservationKey, Question } from "./types";
+import type { AnalysisResult, ApiSource, BriefData, Confidence, DetectedGarment, Difference, GarmentType, Observation, ObservationKey, Question } from "./types";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 const ok = <T>(value: T): Result<T> => ({ ok: true, value });
@@ -10,6 +10,7 @@ export const OBSERVATION_KEYS: ObservationKey[] = [
   "garment_category", "silhouette", "neckline", "sleeves", "length_category",
   "design_details", "color", "fabric_appearance", "construction_considerations",
 ];
+export const GARMENT_TYPES: GarmentType[] = ["dress", "top", "trousers", "skirt", "outerwear", "other"];
 export const API_SOURCES: ApiSource[] = ["observed", "client_confirmed", "ai_suggestion", "unknown"];
 const CONFIDENCES: Confidence[] = ["high", "medium", "low"];
 
@@ -59,13 +60,31 @@ export function parseObservation(v: unknown, i = 0): Result<Observation> {
   if (!OBSERVATION_KEYS.includes(key)) return fail(`Observation ${i} has an unknown key.`);
   if (!API_SOURCES.includes(v.source as ApiSource)) return fail(`Observation ${i} has an invalid source.`);
   if (!CONFIDENCES.includes(v.confidence as Confidence)) return fail(`Observation ${i} has an invalid confidence.`);
+  const piece = text(v.piece, "piece", 60);
+  if (!piece.ok) return fail(`Observation ${i} is missing the garment it describes.`);
   const label = text(v.label, "label", LIMITS.MAX_SHORT_TEXT);
   if (!label.ok) return fail(label.error);
   const value = text(v.value, "value", LIMITS.MAX_ANSWER);
   if (!value.ok) return fail(value.error);
   const note = text(v.note, "note", LIMITS.MAX_ANSWER, { optional: true });
   if (!note.ok) return fail(note.error);
-  return ok({ key, label: label.value, value: value.value, source: v.source as ApiSource, confidence: v.confidence as Confidence, ...(note.value ? { note: note.value } : {}) });
+  return ok({ piece: piece.value, key, label: label.value, value: value.value, source: v.source as ApiSource, confidence: v.confidence as Confidence, ...(note.value ? { note: note.value } : {}) });
+}
+
+export function parseGarments(v: unknown): Result<DetectedGarment[]> {
+  if (!Array.isArray(v) || v.length === 0) return fail("The model did not identify any garment.");
+  if (v.length > 4) return fail("Too many garments identified.");
+  const out: DetectedGarment[] = [];
+  for (let i = 0; i < v.length; i++) {
+    const g = v[i];
+    if (!isRecord(g)) return fail(`Garment ${i} is invalid.`);
+    const name = text(g.name, "garment name", 60);
+    if (!name.ok) return fail(name.error);
+    if (!GARMENT_TYPES.includes(g.type as GarmentType)) return fail(`Garment ${i} has an unknown type.`);
+    if (out.some((o) => o.name.toLowerCase() === name.value.toLowerCase())) return fail("Garment names must be unique.");
+    out.push({ name: name.value, type: g.type as GarmentType });
+  }
+  return ok(out);
 }
 
 export function parseObservations(v: unknown): Result<Observation[]> {
@@ -195,7 +214,12 @@ export function parseAnalysisResult(raw: unknown): Result<AnalysisResult> {
   if (!summary.ok) return fail(summary.error);
   const obs = parseObservations(raw.observations);
   if (!obs.ok) return fail(obs.error);
-  const keys = new Set(obs.value.map((o) => o.key));
+  const garments = parseGarments(raw.garments);
+  if (!garments.ok) return fail(garments.error);
+  const names = new Set(garments.value.map((g) => g.name.toLowerCase()));
+  if (obs.value.some((o) => !names.has(o.piece.toLowerCase()))) return fail("An observation refers to a garment that was not identified.");
+  if (garments.value.some((g) => !obs.value.some((o) => o.piece.toLowerCase() === g.name.toLowerCase()))) return fail("An identified garment has no observations.");
+  const keys = new Set(obs.value.map((o) => `${o.piece.toLowerCase()}:${o.key}`));
   if (keys.size !== obs.value.length) return fail("Model returned duplicate observation keys.");
   if (!Array.isArray(raw.missing_information) || raw.missing_information.some((m) => typeof m !== "string"))
     return fail("Model output is missing missing_information.");
@@ -203,7 +227,7 @@ export function parseAnalysisResult(raw: unknown): Result<AnalysisResult> {
   if (!diffs.ok) return fail(diffs.error);
   const qs = parseQuestions(raw.questions, false, 8);
   if (!qs.ok) return fail(qs.error);
-  return ok({ summary: summary.value, differences: diffs.value, observations: obs.value, missing_information: (raw.missing_information as string[]).map((s) => s.trim()).filter(Boolean).slice(0, 12), questions: qs.value });
+  return ok({ summary: summary.value, garments: garments.value, differences: diffs.value, observations: obs.value, missing_information: (raw.missing_information as string[]).map((s) => s.trim()).filter(Boolean).slice(0, 12), questions: qs.value });
 }
 
 const BRIEF_STRINGS = ["garment_overview", "silhouette_and_fit", "neckline_and_sleeves", "length", "fabric_and_materials", "color_and_finishing", "construction_considerations", "client_confirmed_modifications"] as const;

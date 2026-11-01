@@ -18,7 +18,9 @@ export function dedupeQuestions(existing: Question[], proposed: Question[], max 
   return out;
 }
 
-export const isAnswered = (q: Question) => Boolean(q.skipped || (q.answer && q.answer.trim()));
+/** An answer carried over from before the image was replaced does not count until the designer confirms it. */
+export const isAnswered = (q: Question) => !q.needsReview && Boolean(q.skipped || (q.answer && q.answer.trim()));
+export const reviewPending = (qs: Question[]) => qs.filter((q) => q.needsReview);
 export const unresolvedRequired = (qs: Question[]) => qs.filter((q) => q.required && !isAnswered(q));
 
 /** Fingerprint of everything a brief is generated from. If it changes, the brief is stale. */

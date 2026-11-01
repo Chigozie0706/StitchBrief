@@ -43,7 +43,7 @@ test("storage failure and corrupt data are handled gracefully", () => {
   const s = new MemStore(); s.quota = 5;
   assert.equal(saveDraft(draft(), s).ok, false);
   assert.equal(saveDraft(draft(), null).ok, false);
-  const bad = new MemStore(); bad.data.set("stitchbrief:drafts:v2", "{not json");
+  const bad = new MemStore(); bad.data.set("stitchbrief:drafts:v3", "{not json");
   assert.deepEqual(loadDrafts(bad), []);
   assert.deepEqual(loadDrafts(null), []);
 });
@@ -60,7 +60,7 @@ test("uncertainty + date helpers + client file validation", () => {
   assert.equal(isUncertain({ key: "color", label: "c", value: "v", source: "observed", confidence: "low" }), true);
   assert.equal(isUncertain({ key: "color", label: "c", value: "v", source: "observed", confidence: "high" }), false);
   assert.equal(formatUpdated("not a date"), "");
-  assert.equal(validateImageFile({ type: "image/gif", size: 10 }), "Please choose a JPEG, PNG or WebP image.");
-  assert.match(validateImageFile({ type: "image/png", size: 11_000_000 })!, /10 MB/);
+  assert.match(validateImageFile({ type: "image/gif", size: 10 })!, /GIF files aren’t supported.*JPEG, PNG or WebP/);
+  assert.match(validateImageFile({ type: "image/png", size: 11_000_000 })!, /11\.0 MB.*limit is 10 MB/);
   assert.equal(validateImageFile({ type: "image/webp", size: 1000 }), null);
 });

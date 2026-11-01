@@ -1,6 +1,7 @@
 import { LIMITS } from "../config";
 import { listModels, MetaApiError, ModelOutputError, readMetaConfig } from "../meta/client";
 import { parseAnalyzeRequest, parseClarifyRequest, parseGenerateRequest, type Result } from "../validation";
+import { sha256Hex } from "../hash";
 import { getProvider, type BriefProvider } from "./provider";
 import { rateLimit } from "./rate-limit";
 
@@ -44,7 +45,7 @@ function mapFailure(e: unknown): Response {
 function make<Req, Res>(
   parse: (body: unknown) => Result<Req>,
   run: (p: BriefProvider, r: Req) => Promise<Res>,
-  wrap: (res: Res) => unknown,
+  wrap: (res: Res, req: Req) => unknown | Promise<unknown>,
 ): Handler {
   return async (req, provider = getProvider()) => {
     const rl = rateLimit(clientKey(req));
@@ -56,16 +57,17 @@ function make<Req, Res>(
     if (!parsed.ok) return err(400, "invalid_request", parsed.error);
     try {
       const out = await run(provider, parsed.value);
-      return Response.json({ ok: true, provider: provider.mode, model: provider.model, data: wrap(out) });
+      return Response.json({ ok: true, provider: provider.mode, model: provider.model, data: await wrap(out, parsed.value) });
     } catch (e) {
       return mapFailure(e);
     }
   };
 }
 
-export const handleAnalyze = make(parseAnalyzeRequest, (p, r) => p.analyze(r), (d) => d);
+// The server hashes the exact bytes it received; the client compares with its own hash to prove the right image was analysed.
+export const handleAnalyze = make(parseAnalyzeRequest, (p, r) => p.analyze(r), async (d, r) => ({ ...d, imageHash: await sha256Hex(r.image) }));
 export const handleClarify = make(parseClarifyRequest, (p, r) => p.clarify(r), (questions) => ({ questions }));
-export const handleGenerate = make(parseGenerateRequest, (p, r) => p.generate(r), (brief) => ({ brief }));
+export const handleGenerate = make(parseGenerateRequest, (p, r) => p.generate(r), async (brief, r) => ({ brief, imageHash: r.image ? await sha256Hex(r.image) : null }));
 
 /** GET /api/health[?verify=1] — reports configuration without exposing the key. */
 export async function handleHealth(req: Request, env: Record<string, string | undefined> = process.env, fetchImpl: typeof fetch = fetch): Promise<Response> {

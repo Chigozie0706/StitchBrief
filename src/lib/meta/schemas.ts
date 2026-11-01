@@ -8,16 +8,26 @@ const strList = { type: "array", items: str };
 export const ANALYSIS_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["summary", "observations", "missing_information", "differences", "questions"],
+  required: ["summary", "garments", "observations", "missing_information", "differences", "questions"],
   properties: {
     summary: str,
+    garments: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "type"],
+        properties: { name: str, type: { type: "string", enum: ["dress", "top", "trousers", "skirt", "outerwear", "other"] } },
+      },
+    },
     observations: {
       type: "array",
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["key", "label", "value", "source", "confidence", "note"],
+        required: ["piece", "key", "label", "value", "source", "confidence", "note"],
         properties: {
+          piece: str,
           key: { type: "string", enum: OBSERVATION_KEYS },
           label: str,
           value: str,

@@ -10,11 +10,12 @@ import { Editor } from "@/components/views/editor";
 import { Settings } from "@/components/views/settings";
 import { briefToSections, formatUpdated } from "@/lib/brief";
 import { answersKey, isAnswered } from "@/lib/clarify";
+import { analysisKey, applyReanalysis, garmentMismatch, NOT_SURE, outfitLabel, type ReviewNote } from "@/lib/upload-flow";
 import { demoBriefs, generateDemoSections } from "@/lib/data";
 import { loadDrafts, saveDraft, type SaveOutcome } from "@/lib/storage";
-import type { BriefForm, BriefStatus, Difference, Observation, Provider, Question, SavedBrief, Section, View } from "@/lib/types";
+import type { BriefForm, BriefStatus, DetectedGarment, Difference, Observation, Provider, Question, SavedBrief, Section, View } from "@/lib/types";
 
-const emptyForm: BriefForm = { image: "", thumb: "", description: "", garment: "Dress", occasion: "" };
+const emptyForm: BriefForm = { image: "", thumb: "", imageHash: "", imageSource: "original", description: "", garment: NOT_SURE, occasion: "" };
 const newId = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `d-${Date.now().toString(36)}`);
 
 export function StitchBriefApp() {
@@ -26,6 +27,10 @@ export function StitchBriefApp() {
   const [summary, setSummary] = useState("");
   const [missing, setMissing] = useState<string[]>([]);
   const [differences, setDifferences] = useState<Difference[]>([]);
+  const [garments, setGarments] = useState<DetectedGarment[]>([]);
+  const [reviewNotes, setReviewNotes] = useState<ReviewNote[]>([]);
+  const [mismatchDismissed, setMismatchDismissed] = useState(false);
+  const [analyzedKey, setAnalyzedKey] = useState("");
   const [followupsChecked, setFollowupsChecked] = useState(false);
   const [generatedFrom, setGeneratedFrom] = useState<string | null>(null);
   const [baseline, setBaseline] = useState<string | null>(null);
@@ -40,6 +45,7 @@ export function StitchBriefApp() {
 
   useEffect(() => { setSaved(loadDrafts()); }, []);
   const allBriefs = [...saved, ...demoBriefs];
+  const mismatch = mismatchDismissed ? null : garmentMismatch(form.garment, garments);
   // A brief is stale when the inputs it was generated from have changed since.
   const stale = sections.length > 0 && generatedFrom !== null && generatedFrom !== answersKey(questions, observations, differences);
   // Unknown baseline (reopened draft) counts as "may contain edits" so we always confirm before overwriting.
@@ -52,7 +58,7 @@ export function StitchBriefApp() {
       id: draftId, title: title || `${form.garment} for ${form.occasion || "client"}`, updated: formatUpdated(now),
       status: status ?? (open ? "Needs clarification" : "Draft"), image: form.thumb || form.image, sections,
       createdAt: createdAt ?? now, updatedAt: now, description: form.description, garment: form.garment, occasion: form.occasion,
-      observations, questions, provider: provider ?? undefined, summary, missing, differences, generatedFrom: generatedFrom ?? undefined,
+      observations, questions, provider: provider ?? undefined, summary, missing, differences, generatedFrom: generatedFrom ?? undefined, imageHash: form.imageHash, garments,
     };
     const out = saveDraft(brief);
     if (out.ok) { setCreatedAt(brief.createdAt); setSaved(loadDrafts()); }
@@ -62,6 +68,7 @@ export function StitchBriefApp() {
   const startNew = () => {
     setForm(emptyForm); setObservations([]); setQuestions([]); setSections([]); setTitle("");
     setSummary(""); setMissing([]); setDifferences([]); setGeneratedFrom(null); setBaseline(null); setPrevious(null);
+    setGarments([]); setReviewNotes([]); setMismatchDismissed(false); setAnalyzedKey("");
     setProvider(null); setFollowupsChecked(false); setDraftId(newId()); setCreatedAt(undefined); setView("upload");
   };
 
@@ -70,12 +77,15 @@ export function StitchBriefApp() {
       setDraftId(b.id); setCreatedAt(b.createdAt); setTitle(b.title); setSections(b.sections);
       setObservations(b.observations); setQuestions(b.questions); setFollowupsChecked(true); setProvider(b.provider ?? null);
       setSummary(b.summary ?? ""); setMissing(b.missing ?? []); setDifferences(b.differences ?? []); setGeneratedFrom(b.generatedFrom ?? null); setBaseline(null); setPrevious(null);
-      setForm({ image: b.image, thumb: b.image, description: b.description ?? "", garment: b.garment ?? "Dress", occasion: b.occasion ?? "" });
+      setGarments(b.garments ?? []); setReviewNotes([]); setMismatchDismissed(false);
+      setForm({ image: b.image, thumb: b.image, imageHash: b.imageHash ?? "", imageSource: "preview", description: b.description ?? "", garment: b.garment ?? "Dress", occasion: b.occasion ?? "" });
+      setAnalyzedKey(analysisKey({ imageHash: b.imageHash ?? "", description: (b.description ?? "").trim(), occasion: b.occasion ?? "" }));
     } else {
       setDraftId(newId()); setCreatedAt(undefined); setTitle(b.title); setObservations([]); setQuestions([]); setProvider(null);
       setSummary(""); setMissing([]); setDifferences([]); setGeneratedFrom(null); setBaseline(null); setPrevious(null);
       setSections(b.sections ?? generateDemoSections("Demo client direction for this garment.", "Dress", "special event", {}));
-      setForm({ ...emptyForm, image: b.image, thumb: "", garment: b.title.split(" ")[0] });
+      setGarments([]); setReviewNotes([]); setMismatchDismissed(false); setAnalyzedKey("");
+      setForm({ ...emptyForm, image: b.image, imageSource: "preview", garment: b.title.split(" ")[0] });
     }
     setView("editor");
   };
@@ -86,12 +96,23 @@ export function StitchBriefApp() {
 
   return <div className="app-shell"><Sidebar view={view} setView={navigate} open={menu} close={() => setMenu(false)} /><div className="main"><Header title={titles[view]} onMenu={() => setMenu(true)} status={status} />
     {view === "overview" && <Overview setView={navigate} briefs={allBriefs} openBrief={openBrief} />}
-    {view === "upload" && <Upload initial={form} onAnalyzed={({ form: f, analysis, provider: p }) => {
-      setForm(f); setObservations(analysis.observations); setQuestions(analysis.questions); setProvider(p); setFollowupsChecked(false);
-      setSummary(analysis.summary); setMissing(analysis.missing_information); setDifferences(analysis.differences);
-      setGeneratedFrom(null); setBaseline(null); setPrevious(null); setSections([]); setTitle(""); setView("clarify");
-    }} />}
-    {view === "clarify" && <Clarify data={form} summary={summary} missing={missing} differences={differences} hasEdits={hasEdits} observations={observations} setObservations={setObservations} questions={questions} setQuestions={setQuestions} provider={provider} followupsChecked={followupsChecked} setFollowupsChecked={setFollowupsChecked} back={() => setView("upload")} onGenerated={({ brief, provider: p, key }) => {
+    {view === "upload" && <Upload initial={form} analyzedKey={analyzedKey} hasBrief={sections.length > 0}
+      onContinue={({ garment }) => { setForm({ ...form, garment }); setMismatchDismissed(false); setView("clarify"); }}
+      onAnalyzed={({ form: f, analysis, provider: p }) => {
+        // New image or request: image observations are never carried over. Earlier answers survive but must be re-confirmed.
+        const hadAnalysis = observations.length > 0;
+        const carried = hadAnalysis
+          ? applyReanalysis({ prevQuestions: questions, prevObservations: observations, nextQuestions: analysis.questions, nextObservations: analysis.observations })
+          : { questions: analysis.questions, reviewNotes: [] as ReviewNote[] };
+        // "Not sure" is replaced by what the analysis found, and shown to the designer in the garment check.
+        setForm(f.garment === NOT_SURE ? { ...f, garment: outfitLabel(analysis.garments) } : f);
+        setObservations(analysis.observations); setQuestions(carried.questions); setReviewNotes(carried.reviewNotes);
+        setGarments(analysis.garments); setMismatchDismissed(false); setProvider(p); setFollowupsChecked(false);
+        setAnalyzedKey(analysisKey({ imageHash: f.imageHash, description: f.description, occasion: f.occasion }));
+        setSummary(analysis.summary); setMissing(analysis.missing_information); setDifferences(analysis.differences);
+        setGeneratedFrom(null); setBaseline(null); setPrevious(null); setSections([]); setTitle(""); setView("clarify");
+      }} />}
+    {view === "clarify" && <Clarify data={form} garments={garments} mismatch={mismatch} reviewNotes={reviewNotes} onResolveMismatch={(action) => { if (action === "use-detected") setForm({ ...form, garment: outfitLabel(garments) }); else setMismatchDismissed(true); }} dismissNotes={() => setReviewNotes([])} summary={summary} missing={missing} differences={differences} hasEdits={hasEdits} observations={observations} setObservations={setObservations} questions={questions} setQuestions={setQuestions} provider={provider} followupsChecked={followupsChecked} setFollowupsChecked={setFollowupsChecked} back={() => setView("upload")} onGenerated={({ brief, provider: p, key }) => {
       const next = briefToSections(brief);
       if (sections.length > 0) setPrevious({ title, sections });
       setProvider(p); setTitle(brief.title); setSections(next); setGeneratedFrom(key); setBaseline(JSON.stringify({ title: brief.title, sections: next })); setView("editor");
