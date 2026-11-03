@@ -2,19 +2,21 @@
 
 import { useState } from "react";
 import { ArrowLeft, Check, Clipboard, Printer, Save } from "lucide-react";
-import { briefToMarkdown, briefToText } from "@/lib/brief";
+import { briefToMarkdown, briefToText, reviewSummary } from "@/lib/brief";
 import type { SaveOutcome } from "@/lib/storage";
 import type { BriefForm, Provider, Section } from "@/lib/types";
 import { MockNotice } from "./clarify";
 
-export function Editor({ data, title, setTitle, sections, setSections, provider, save, back, ready, stale, hasPrevious, restore }: {
-  data: BriefForm; title: string; setTitle: (t: string) => void; sections: Section[]; setSections: (s: Section[]) => void;
+export function Editor({ data, title, setTitle, sections, setSections, warnings, provider, save, back, ready, stale, hasPrevious, restore }: {
+  data: BriefForm; title: string; setTitle: (t: string) => void; sections: Section[]; setSections: (s: Section[]) => void; warnings: string[];
   provider: Provider | null; save: () => SaveOutcome; back: () => void; ready: () => SaveOutcome;
   stale: boolean; hasPrevious: boolean; restore: () => void;
 }) {
   const [dirty, setDirty] = useState(true);
   const [copied, setCopied] = useState(false);
   const [message, setMessage] = useState("");
+  const [reviewing, setReviewing] = useState(false);
+  const summary = reviewSummary(sections);
   const report = (out: SaveOutcome) => {
     if (!out.ok) { setMessage(out.error ?? "Could not save this draft."); return false; }
     setDirty(false);
@@ -36,14 +38,22 @@ export function Editor({ data, title, setTitle, sections, setSections, provider,
     <MockNotice provider={provider} />
     {stale && <div className="notice stale-notice" role="status"><p><strong>This brief may be out of date.</strong><br />Answers or observations changed after it was generated. Review them, then generate again.</p><button className="secondary" onClick={back}>Back to clarification</button></div>}
     {hasPrevious && <div className="notice" role="status"><p><strong>New version generated.</strong><br />Your earlier version is still available for this session.</p><button className="secondary" onClick={() => { restore(); setDirty(true); }}>Restore previous version</button></div>}
+    {warnings.map((w) => <div className="notice" role="status" key={w}><p>{w}</p></div>)}
     {message && <div className="notice" role="status"><p>{message}</p></div>}
     <div className="editor-grid">
       <main className="document"><div className="doc-kicker">Sewing brief · Draft</div><input className="doc-title" aria-label="Brief title" value={title} onChange={(e) => { setDirty(true); setTitle(e.target.value); }} />
         <div className="doc-meta"><span>Prepared in StitchBrief</span><span>{new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}</span></div>
-        {sections.map((section, i) => <section className="doc-section" key={section.title}><span>{String(i + 1).padStart(2, "0")}</span><div><h3>{section.title}</h3><textarea aria-label={section.title} value={section.body} onChange={(e) => { setDirty(true); setSections(sections.map((s, n) => n === i ? { ...s, body: e.target.value } : s)); }} /></div></section>)}
+        {sections.map((section, i) => <section className="doc-section" key={section.title}><span>{String(i + 1).padStart(2, "0")}</span><div><h3>{section.title}</h3><textarea aria-label={section.title} rows={Math.max(2, section.body.split("\n").reduce((n, l) => n + Math.max(1, Math.ceil(l.length / 78)), 0))} value={section.body} onChange={(e) => { setDirty(true); setSections(sections.map((s, n) => n === i ? { ...s, body: e.target.value } : s)); }} /></div></section>)}
         <div className="disclaimer"><strong>Planning note</strong>This brief records visual observations, client requirements, and stated suggestions. It is not a sewing pattern and does not replace professional pattern drafting, fitting, or measurement taking.</div>
       </main>
-      <aside className="context">{data.image && <img src={data.image} alt="Reference garment" />}<p className="eyebrow">Reference context</p><h3>{data.garment}</h3><p>{data.description}</p><hr /><strong>Source key</strong><ul><li><i className="dot observed" />Observed from image</li><li><i className="dot confirmed" />Confirmed by client</li><li><i className="dot suggested" />Suggested by AI</li><li><i className="dot unknown" />Still unanswered</li></ul><button className="primary full" onClick={() => { if (report(ready())) { /* app navigates */ } }}><Check /> Mark as ready</button></aside>
+      <aside className="context">{data.image && <img src={data.image} alt="Reference garment" />}<p className="eyebrow">Reference context</p><h3>{data.garment}</h3><p>{data.description}</p><hr /><strong>Source key</strong><ul><li><i className="dot observed" />Observed in the reference</li><li><i className="dot confirmed" />Confirmed by the client</li><li><i className="dot suggested" />Suggested by AI, not approved</li><li><i className="dot uncertain" />Uncertain</li><li><i className="dot unknown" />Unknown</li><li><i className="dot measure" />Needs measurement</li></ul>
+        {!reviewing ? <button className="primary full" onClick={() => setReviewing(true)}><Check /> Mark ready for tailor review</button> : <div className="ready-review" data-testid="ready-review">
+          <strong>Before you mark this ready</strong>
+          <p className="hint">“Ready” means ready for a tailor to review. It does not mean ready to cut or sew. Nothing below is hidden or resolved by marking it ready.</p>
+          {([["Confirmed decisions", summary.confirmed], ["Uncertain and unresolved", summary.uncertain], ["Unknown technical details", summary.unknown], ["Measurements still to take or set", summary.measurements]] as const).map(([label, items]) => <div key={label} data-testid={`review-${label.split(" ")[0].toLowerCase()}`}><b>{label} ({items.length})</b>{items.length ? <ul>{items.slice(0, 6).map((it) => <li key={it}>{it}</li>)}{items.length > 6 && <li>…and {items.length - 6} more</li>}</ul> : <p className="hint">None recorded.</p>}</div>)}
+          <button className="primary full" onClick={() => { if (report(ready())) setReviewing(false); }}><Check /> Mark ready for tailor review</button>
+          <button className="text-button" onClick={() => setReviewing(false)}>Keep editing</button>
+        </div>}</aside>
     </div>
   </div>;
 }

@@ -1,8 +1,9 @@
 import { ArrowRight, FileText, Image, LayoutGrid, Menu, Plus, Settings, X } from "lucide-react";
+import { statusLabel } from "@/lib/brief";
 import type { BriefStatus, SavedBrief, View } from "@/lib/types";
 
 export function Status({ children }: { children: BriefStatus }) {
-  return <span className={`status status-${children.toLowerCase().replace(" ", "-")}`}><span />{children}</span>;
+  return <span className={`status status-${children.toLowerCase().replace(" ", "-")}`}><span />{statusLabel(children)}</span>;
 }
 
 export function Sidebar({ view, setView, open, close }: { view: View; setView: (v: View) => void; open: boolean; close: () => void }) {

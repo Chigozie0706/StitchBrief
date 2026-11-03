@@ -8,6 +8,9 @@ import { readFileSync } from "node:fs";
 import { extname } from "node:path";
 import { listModels, MetaApiError, ModelOutputError, readMetaConfig, type MetaConfig } from "../src/lib/meta/client";
 import { createLiveProvider } from "../src/lib/server/provider";
+import { assembleBrief, buildLedger, confirmedTopics } from "../src/lib/assemble";
+import { dedupeQuestions } from "../src/lib/clarify";
+import { autoRequested, garmentLabelFor } from "../src/lib/upload-flow";
 import { parseImageDataUrl } from "../src/lib/validation";
 import type { Question } from "../src/lib/types";
 
@@ -43,7 +46,7 @@ export async function runSmoke(config: MetaConfig, imagePath: string, descriptio
   if (!check.ok) throw new Error(check.error);
 
   const provider = createLiveProvider(config, fetchImpl);
-  const ctx = { description, garment: "Dress", occasion: "" };
+  const ctx = { description, garment: "", occasion: "" };
 
   await run("GET /models", async () => {
     const ids = await listModels(config, fetchImpl);
@@ -53,20 +56,25 @@ export async function runSmoke(config: MetaConfig, imagePath: string, descriptio
 
   const analysis = await run("analyze (image + structured output)", async () => {
     const a = await provider.analyze({ ...ctx, image });
-    const by = (s: string) => a.observations.filter((o) => o.source === s).length;
-    return { value: a, detail: `${a.observations.length} observations (observed ${by("observed")}, client_confirmed ${by("client_confirmed")}, ai_suggestion ${by("ai_suggestion")}, unknown ${by("unknown")}); ${a.questions.length} questions; ${a.differences.length} differences` };
+    const by = (st: string) => a.observations.filter((o) => o.status === st).length;
+    return { value: a, detail: `${a.garments.length} garment(s) [${a.garments.map((g) => `${g.name}:${g.type}`).join(", ")}]; ${a.observations.length} details (observed ${by("observed")}, client_confirmed ${by("client_confirmed")}, ai_suggested ${by("ai_suggested")}, uncertain ${by("uncertain")}, unknown ${by("unknown")}, needs_measurement ${by("needs_measurement")}); ${a.questions.length} questions; ${a.differences.length} differences` };
   });
   if (!analysis) return { ok: false, model: config.model, steps };
 
-  const answered: Question[] = analysis.questions.map((q, i) => (i === 0 ? { ...q, answer: q.options[0] ?? "Test answer" } : q));
-  const followups = await run("clarify (answers sent back)", async () => {
-    const f = await provider.clarify({ ...ctx, observations: analysis.observations, questions: answered, differences: analysis.differences });
-    return { value: f, detail: `${f.length} new follow-up question(s), none repeating earlier ones` };
+  // The smoke test picks the first visible garment when several are shown (the app asks the designer).
+  const requested = autoRequested("", analysis.garments) ?? [analysis.garments[0].name];
+  const answered: Question[] = analysis.questions.map((q, i) => (i === 0 ? { ...q, answer: q.options[0] ?? "Test answer", round: 1 as const } : { ...q, round: 1 as const }));
+  const base = { ...ctx, garment: garmentLabelFor(analysis.garments.filter((g) => requested.includes(g.name))), observations: analysis.observations, differences: analysis.differences, requested };
+  const followups = await run("clarify (follow-up round)", async () => {
+    const f = dedupeQuestions(answered, await provider.clarify({ ...base, questions: answered }), 3, confirmedTopics(buildLedger({ ...base, questions: answered })));
+    return { value: f, detail: `${f.length} new follow-up question(s) after removing repeats and confirmed topics` };
   });
 
-  await run("generate-brief (validated schema)", async () => {
-    const b = await provider.generate({ ...ctx, image, observations: analysis.observations, questions: [...answered, ...(followups ?? [])], differences: analysis.differences });
-    return { value: b, detail: `title "${b.title}"; ${b.open_questions.length} open questions; ${b.measurements_required.length} measurements listed` };
+  await run("generate-brief (validated + assembled)", async () => {
+    const questions = [...answered, ...(followups ?? [])];
+    const b = await provider.generate({ ...base, image, questions });
+    const { sections, warnings } = assembleBrief(b, buildLedger({ ...base, questions }), base);
+    return { value: b, detail: `title "${b.title}"; ${b.pieces.length} piece(s); ${sections.length} sections; ${warnings.length} warning(s)` };
   });
 
   return { ok: steps.every((s) => s.ok), model: config.model, steps };
