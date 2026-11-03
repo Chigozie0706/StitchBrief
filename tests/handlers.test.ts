@@ -3,26 +3,28 @@ import assert from "node:assert/strict";
 import { handleAnalyze, handleClarify, handleGenerate, handleHealth } from "../src/lib/server/handlers";
 import { createLiveProvider, getProvider, mockProvider } from "../src/lib/server/provider";
 import { _resetRateLimit } from "../src/lib/server/rate-limit";
-import { dedupeQuestions, unresolvedRequired } from "../src/lib/clarify";
-import { GIF, goodAnalyzeBody, liveAnalysisJson, liveBriefJson, completion, stubFetch } from "./helpers";
+import { dedupeQuestions } from "../src/lib/clarify";
+import { GIF, choice, completion, goodAnalyzeBody, liveAnalysisJson, liveBriefJson, qn, stubFetch } from "./helpers";
+import type { Question } from "../src/lib/types";
 
 const post = (body: unknown, headers: Record<string, string> = {}) =>
   new Request("http://x/api", { method: "POST", body: typeof body === "string" ? body : JSON.stringify(body), headers: { "content-type": "application/json", ...headers } });
 const config = { apiKey: "LLM_1_k", model: "muse-spark-1.3", baseUrl: "https://api.meta.ai/v1" };
 beforeEach(() => _resetRateLimit());
+const genBody = (over: Record<string, unknown> = {}) => ({ ...goodAnalyzeBody(), image: undefined, observations: liveAnalysisJson.observations, differences: [], requested: [], questions: [], ...over });
 
-test("no MODEL_API_KEY -> mock provider, clearly labelled in the response", async () => {
+test("no MODEL_API_KEY -> mock provider, clearly labelled, never claims to have observed the image", async () => {
   assert.equal(getProvider({}).mode, "mock");
   const res = await handleAnalyze(post(goodAnalyzeBody()), mockProvider);
   const json = await res.json();
   assert.equal(res.status, 200);
-  assert.equal(json.provider, "mock");
-  assert.equal(json.model, null);
+  assert.deepEqual([json.provider, json.model], ["mock", null]);
   assert.ok(json.data.observations.length >= 9);
-  assert.ok(json.data.observations.every((o: { source: string }) => o.source !== "observed"), "mock must never claim to have observed the image");
+  assert.ok(json.data.observations.every((o: { status: string }) => o.status !== "observed"));
+  assert.ok(json.data.questions.every((q: Question) => q.priority && q.topic && !("required" in q)), "no question is 'required': every one can be skipped");
 });
 
-test("analyze rejects bad input with 400 and does not call the provider", async () => {
+test("analyze rejects bad input with 400 and never calls the provider", async () => {
   let called = false;
   const spy = { ...mockProvider, analyze: async () => { called = true; return mockProvider.analyze(goodAnalyzeBody() as never); } };
   for (const body of [{ ...goodAnalyzeBody(GIF) }, { ...goodAnalyzeBody(), description: "" }, "{bad json", { nope: 1 }]) {
@@ -34,90 +36,75 @@ test("analyze rejects bad input with 400 and does not call the provider", async 
 });
 
 test("oversized request bodies are refused with 413", async () => {
-  const res = await handleAnalyze(post(goodAnalyzeBody(), { "content-length": "99000000" }), mockProvider);
-  assert.equal(res.status, 413);
+  assert.equal((await handleAnalyze(post(goodAnalyzeBody(), { "content-length": "99000000" }), mockProvider)).status, 413);
 });
 
-test("live provider: analyze parses and validates model output", async () => {
-  const { fn, calls } = stubFetch([{ json: completion(liveAnalysisJson) }]);
-  const res = await handleAnalyze(post(goodAnalyzeBody()), createLiveProvider(config, fn));
-  const json = await res.json();
-  assert.equal(res.status, 200);
+test("live analyze: output is validated, questions are capped, de-duplicated by topic and stamped round 1", async () => {
+  const many = { ...liveAnalysisJson, questions: [...liveAnalysisJson.questions, qn("fit2", "How snug?", { topic: "fit" }), ...["a", "b", "c", "d", "e"].map((x) => qn(x, `Question ${x}?`, { topic: `t_${x}` }))] };
+  const { fn, calls } = stubFetch([{ json: completion(many) }]);
+  const json = await (await handleAnalyze(post(goodAnalyzeBody()), createLiveProvider(config, fn))).json();
   assert.equal(json.provider, "live");
-  assert.equal(json.model, "muse-spark-1.3");
-  assert.equal(json.data.observations[0].source, "observed");
-  assert.equal(calls.length, 1);
-  const sent = JSON.parse(calls[0].init.body as string);
-  assert.equal(sent.messages[1].content[1].type, "image_url");
+  assert.equal(json.data.questions.length, 5);
+  assert.ok(!json.data.questions.some((q: Question) => q.id === "fit2"), "same topic twice is one question");
+  assert.ok(json.data.questions.every((q: Question) => q.round === 1));
+  assert.equal(JSON.parse(calls[0].init.body as string).messages[1].content[1].type, "image_url");
 });
 
-test("live provider: invalid model output is retried once then surfaced as 502, never invented", async () => {
-  const { fn, calls } = stubFetch([{ json: completion({ summary: "x" }) }]);
-  const res = await handleAnalyze(post(goodAnalyzeBody()), createLiveProvider(config, fn));
+test("analysis never asks about something the client's own description already settles", async () => {
+  const withNeckline = { ...liveAnalysisJson, questions: [...liveAnalysisJson.questions, choice("neck", "Which neckline?", ["V", "Square"], { topic: "neckline" })] };
+  const json = await (await handleAnalyze(post(goodAnalyzeBody()), createLiveProvider(config, stubFetch([{ json: completion(withNeckline) }]).fn))).json();
+  assert.ok(!json.data.questions.some((q: Question) => q.id === "neck"), "'a higher neckline' is already a stated decision (difference)");
+});
+
+test("invalid model output is retried once then surfaced as 502, never repaired; invalid-then-valid succeeds", async () => {
+  const bad = stubFetch([{ json: completion({ summary: "x" }) }]);
+  const res = await handleAnalyze(post(goodAnalyzeBody()), createLiveProvider(config, bad.fn));
   assert.equal(res.status, 502);
   assert.equal((await res.json()).error.code, "invalid_model_output");
-  assert.equal(calls.length, 2);
+  assert.equal(bad.calls.length, 2);
+  _resetRateLimit();
+  const ok = await handleAnalyze(post(goodAnalyzeBody()), createLiveProvider(config, stubFetch([{ json: completion("garbage") }, { json: completion(liveAnalysisJson) }]).fn));
+  assert.equal(ok.status, 200);
 });
 
-test("live provider: invalid then valid output succeeds on the retry", async () => {
-  const { fn } = stubFetch([{ json: completion("garbage") }, { json: completion(liveAnalysisJson) }]);
-  const res = await handleAnalyze(post(goodAnalyzeBody()), createLiveProvider(config, fn));
-  assert.equal(res.status, 200);
-});
-
-test("upstream 401/429/503 surface as safe errors", async () => {
+test("upstream 401/429 surface as safe errors", async () => {
   const r401 = await handleAnalyze(post(goodAnalyzeBody()), createLiveProvider(config, stubFetch([{ status: 401, json: {} }]).fn));
   assert.equal(r401.status, 502);
   assert.match((await r401.json()).error.message, /MODEL_API_KEY/);
   _resetRateLimit();
-  const r429 = await handleAnalyze(post(goodAnalyzeBody()), createLiveProvider(config, stubFetch([{ status: 429, json: {} }]).fn));
-  assert.equal(r429.status, 429);
+  assert.equal((await handleAnalyze(post(goodAnalyzeBody()), createLiveProvider(config, stubFetch([{ status: 429, json: {} }]).fn))).status, 429);
 });
 
-test("generate-brief: valid brief passes through; incomplete brief is rejected", async () => {
-  const body = { ...goodAnalyzeBody(), image: undefined, observations: liveAnalysisJson.observations, questions: [{ ...liveAnalysisJson.questions[0], answer: "Fitted" }] };
-  const ok = await handleGenerate(post(body), createLiveProvider(config, stubFetch([{ json: completion(liveBriefJson) }]).fn));
+test("generate-brief: a valid model brief is assembled into labelled sections; an incomplete one is rejected", async () => {
+  const ok = await handleGenerate(post(genBody()), createLiveProvider(config, stubFetch([{ json: completion(liveBriefJson) }]).fn));
+  const json = await ok.json();
   assert.equal(ok.status, 200);
-  assert.equal((await ok.json()).data.brief.title, "Burgundy evening dress");
+  assert.equal(json.data.brief.title, "Burgundy evening dress");
+  assert.deepEqual(json.data.sections.map((s: { kind: string }) => s.kind), ["overview", "confirmed", "specification", "fit", "fabric", "construction", "body_measurements", "garment_dimensions", "suggestions", "uncertain", "unknown", "checklist"]);
   const { garment_overview: _g, ...partial } = liveBriefJson;
-  const bad = await handleGenerate(post(body), createLiveProvider(config, stubFetch([{ json: completion(partial) }]).fn));
-  assert.equal(bad.status, 502);
+  assert.equal((await handleGenerate(post(genBody()), createLiveProvider(config, stubFetch([{ json: completion(partial) }]).fn))).status, 502);
 });
 
-test("mock generate-brief: only answered questions become confirmed; skipped become open", async () => {
-  const body = {
-    ...goodAnalyzeBody(), image: undefined, observations: liveAnalysisJson.observations,
-    questions: [
-      { id: "fit", question: "How should it fit?", reason: "r", type: "single_select", options: ["Fitted", "Relaxed"], required: true, answer: "Fitted" },
-      { id: "changes", question: "Changes from reference?", reason: "r", type: "text", options: [], required: false, skipped: true },
-    ],
-  };
-  const json = await (await handleGenerate(post(body), mockProvider)).json();
-  const b = json.data.brief;
-  assert.match(b.silhouette_and_fit, /Fitted/);
-  assert.equal(b.client_confirmed_modifications, "None confirmed.");
-  assert.ok(b.open_questions.includes("Changes from reference?"));
-  assert.ok(!b.open_questions.includes("How should it fit?"));
-});
-
-test("clarify never repeats an already-asked question (by id or wording)", async () => {
-  const asked = liveAnalysisJson.questions.map((q) => ({ ...q, skipped: true }));
-  const proposed = [
-    { id: "fit", question: "x", reason: "r", type: "text", options: [], required: false },
-    { id: "other", question: "How should it fit??", reason: "r", type: "text", options: [], required: false },
-    { id: "lining", question: "Lined?", reason: "r", type: "single_select", options: ["Yes", "No"], required: false },
+test("mock generate-brief: answered → confirmed; skipped → unresolved; nothing is 'confirmed' by default", async () => {
+  const questions = [
+    { ...choice("fit", "How should it fit?", ["Fitted", "Relaxed"], { topic: "fit" }), answer: "Fitted" },
+    { ...qn("changes", "Changes from reference?", { topic: "changes" }), skipped: true },
   ];
-  const { fn } = stubFetch([{ json: completion({ questions: proposed }) }]);
-  const body = { ...goodAnalyzeBody(), image: undefined, observations: liveAnalysisJson.observations, questions: asked };
-  const res = await handleClarify(post(body), createLiveProvider(config, fn));
-  const ids = (await res.json()).data.questions.map((q: { id: string }) => q.id);
-  assert.deepEqual(ids, ["lining"]);
+  const data = (await (await handleGenerate(post(genBody({ questions })), mockProvider)).json()).data;
+  const body = (k: string) => data.sections.filter((s: { kind: string }) => s.kind === k).map((s: { body: string }) => s.body).join("\n");
+  assert.match(body("confirmed"), /Fit: Fitted/);
+  assert.match(body("uncertain"), /Changes from reference\? \(Skipped by the designer\)/);
+  assert.doesNotMatch(body("confirmed"), /Changes/);
+  const empty = (await (await handleGenerate(post(genBody({ observations: liveAnalysisJson.observations.filter((o) => o.status !== "client_confirmed") })), mockProvider)).json()).data;
+  assert.match(empty.sections.find((s: { kind: string }) => s.kind === "confirmed").body, /None recorded|Fit/);
 });
 
-test("dedupeQuestions caps results; unresolvedRequired respects answer/skip", () => {
-  const mk = (id: string) => ({ id, question: `Q ${id}`, reason: "r", type: "text" as const, options: [], required: true });
-  assert.equal(dedupeQuestions([], ["a", "b", "c", "d", "e"].map(mk), 3).length, 3);
-  assert.deepEqual(unresolvedRequired([{ ...mk("a"), answer: "x" }, { ...mk("b"), skipped: true }, mk("c")]).map((q) => q.id), ["c"]);
+test("dedupeQuestions: caps, drops repeated id / wording / topic, is garment-aware, and respects confirmed topics", () => {
+  const q = (id: string, topic: string, piece = "", text = `Q ${id}`) => qn(id, text, { topic, piece }) as unknown as Question;
+  assert.equal(dedupeQuestions([], ["a", "b", "c", "d", "e"].map((x) => q(x, x)), 3).length, 3);
+  assert.deepEqual(dedupeQuestions([q("fit", "fit")], [q("fit", "x"), q("z", "fit"), q("y", "y", "", "Q fit")].concat(q("ok", "ok"))).map((x) => x.id), ["ok"]);
+  assert.deepEqual(dedupeQuestions([q("l1", "length", "Top")], [q("l2", "length", "Trousers"), q("l3", "length", "Top")]).map((x) => x.id), ["l2"], "length for the top ≠ length for the trousers");
+  assert.deepEqual(dedupeQuestions([], [q("n", "neckline_style")], 3, new Set(["|neckline"])).map((x) => x.id), [], "confirmed topics are never asked, however phrased");
 });
 
 test("rate limiting returns 429 with Retry-After", async () => {
@@ -131,9 +118,7 @@ test("health: reports mode without exposing the key; verify lists models", async
   const m = await (await handleHealth(new Request("http://x/api/health"), {})).json();
   assert.deepEqual([m.mode, m.keyConfigured, m.model], ["mock", false, null]);
   const env = { MODEL_API_KEY: "LLM_1_topsecret" };
-  const plain = await handleHealth(new Request("http://x/api/health"), env);
-  assert.doesNotMatch(await plain.text(), /topsecret/);
-  const { fn } = stubFetch([{ json: { data: [{ id: "muse-spark-1.3" }] } }]);
-  const v = await (await handleHealth(new Request("http://x/api/health?verify=1"), env, fn)).json();
+  assert.doesNotMatch(await (await handleHealth(new Request("http://x/api/health"), env)).text(), /topsecret/);
+  const v = await (await handleHealth(new Request("http://x/api/health?verify=1"), env, stubFetch([{ json: { data: [{ id: "muse-spark-1.3" }] } }]).fn)).json();
   assert.equal(v.configuredModelAvailable, true);
 });

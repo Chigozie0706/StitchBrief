@@ -1,26 +1,4 @@
-import type { ApiSource, BriefData, Observation, Section } from "./types";
-
-export type SourceLabel = "AI-observed" | "Client-confirmed" | "AI suggestion" | "Unanswered";
-
-const bullets = (items: string[]) => (items.length ? items.map((i) => `• ${i}`).join("\n") : "None");
-
-/** Turns the validated brief into the editable section list used by the editor. */
-export function briefToSections(b: BriefData): Section[] {
-  return [
-    { title: "Garment overview", body: b.garment_overview },
-    { title: "Silhouette and fit", body: b.silhouette_and_fit },
-    { title: "Neckline and sleeves", body: b.neckline_and_sleeves },
-    { title: "Length", body: b.length },
-    { title: "Fabric and material requirements", body: b.fabric_and_materials },
-    { title: "Color and finishing details", body: b.color_and_finishing },
-    { title: "Construction considerations", body: b.construction_considerations },
-    { title: "Client-confirmed modifications", body: b.client_confirmed_modifications },
-    { title: "Measurements required from the client", body: bullets(b.measurements_required) },
-    { title: "Assumptions and uncertainties", body: bullets(b.assumptions_and_uncertainties) },
-    { title: "Open questions", body: bullets(b.open_questions) },
-    { title: "Final review checklist", body: bullets(b.final_review_checklist) },
-  ];
-}
+import type { BriefStatus, Section } from "./types";
 
 export function briefToText(title: string, sections: Section[]): string {
   return `${title}\n\n` + sections.map((s) => `${s.title}\n${s.body}`).join("\n\n");
@@ -30,14 +8,18 @@ export function briefToMarkdown(title: string, sections: Section[]): string {
   return `# ${title}\n\n` + sections.map((s) => `## ${s.title}\n\n${s.body}`).join("\n\n") + "\n";
 }
 
-export const SOURCE_LABEL: Record<ApiSource, SourceLabel> = {
-  observed: "AI-observed",
-  client_confirmed: "Client-confirmed",
-  ai_suggestion: "AI suggestion",
-  unknown: "Unanswered",
-};
+/** "Ready" means ready for a tailor to REVIEW, not ready to cut or sew. */
+export const statusLabel = (s: BriefStatus) => (s === "Ready" ? "Ready for tailor review" : s);
 
-export const isUncertain = (o: Observation) => o.confidence === "low" || o.source === "unknown";
+export type ReviewSummary = { confirmed: string[]; uncertain: string[]; unknown: string[]; measurements: string[] };
+const bullets = (s: Section) => s.body.split("\n").filter((l) => l.startsWith("• ")).map((l) => l.slice(2));
+
+/** What the tailor still has to look at, read from the brief as it currently stands (including the designer's edits). */
+export function reviewSummary(sections: Section[]): ReviewSummary {
+  const of = (...kinds: Section["kind"][]) => sections.filter((s) => kinds.includes(s.kind));
+  const measurements = of("body_measurements", "garment_dimensions").flatMap((s) => bullets(s).map((b) => `${s.piece && sections.filter((x) => x.kind === s.kind).length > 1 ? `${s.piece}: ` : ""}${b}`));
+  return { confirmed: of("confirmed").flatMap(bullets), uncertain: of("uncertain").flatMap(bullets), unknown: of("unknown").flatMap(bullets), measurements };
+}
 
 export function formatUpdated(iso: string | undefined, now = new Date()): string {
   if (!iso) return "";

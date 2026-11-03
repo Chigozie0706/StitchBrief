@@ -1,7 +1,7 @@
 import type { SavedBrief } from "./types";
 import { formatUpdated } from "./brief";
 
-const KEY = "stitchbrief:drafts:v2";
+const KEY = "stitchbrief:drafts:v4";
 type StoreLike = Pick<Storage, "getItem" | "setItem">;
 export type SaveOutcome = { ok: boolean; imageStored: boolean; error?: string };
 

@@ -35,6 +35,7 @@ test("runSmoke against a local fake Meta server: full pipeline over real HTTP", 
     const report = await runSmoke(config, img, "A burgundy dress with a higher neckline");
     assert.equal(report.ok, true, JSON.stringify(report.steps));
     assert.deepEqual(report.steps.map((s) => s.name.split(" ")[0]), ["GET", "analyze", "clarify", "generate-brief"]);
+    assert.match(report.steps[1].detail, /1 garment\(s\) \[Dress:dress\]/);
 
     const chats = seen.filter((s) => s.path === "/v1/chat/completions");
     assert.equal(chats.length, 3);
@@ -52,7 +53,7 @@ test("runSmoke against a local fake Meta server: full pipeline over real HTTP", 
     assert.doesNotMatch(JSON.stringify(report), /LLM_1_local_test_key|base64/);
     // follow-up call carries the answer chosen by the smoke script
     const clarifyText = chats[1].body.messages[1].content[0].text as string;
-    assert.match(clarifyText, /ANSWERED: Fitted/);
+    assert.match(clarifyText, /fit \(answered\)/);
   } finally {
     server.close();
   }

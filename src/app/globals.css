@@ -49,3 +49,38 @@ button:disabled { opacity:.55; cursor:not-allowed; }
 .missing ul { margin:6px 0 0; padding-left:18px; font-size:12px; color:var(--muted); }
 .stale-notice { border-color:#d9a3ab; background:#fbeff0; }
 .notice button.secondary { margin-left:auto; white-space:nowrap; align-self:center; }
+
+/* --- upload experience --- */
+.preview img { object-fit: contain; background: var(--beige); }          /* never crop the garment */
+.reference-image { height: auto; max-height: 520px; object-fit: contain; object-position: center; background: var(--beige); }
+.file-meta { margin: 0 0 8px; font-size: 11px; color: var(--muted); word-break: break-all; }
+.advisory { margin: 0 0 8px; padding: 8px 10px; font-size: 11px; line-height: 1.5; background: #fbf5e6; border: 1px solid #d8b46a; border-radius: 4px; }
+.hint { display: block; margin-top: 6px; font-size: 11px; line-height: 1.5; color: var(--muted); }
+.upload-status { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+.upload-status.uploading, .upload-status.analyzing, .upload-status.preparing { color: var(--wine); }
+.upload-status.failed { color: #7a2230; }
+.status-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 0 0 14px; padding: 10px 14px; border: 1px solid #b9cdbf; background: #eef5f0; font-size: 12px; border-radius: 4px; }
+.status-strip svg { width: 15px; height: 15px; color: var(--green); }
+.status-strip span { color: var(--muted); }
+.notice-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.mismatch-notice, .review-notice { margin-bottom: 14px; border-color: #d8b46a; background: #fbf5e6; }
+.review-notice ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
+.piece-title { margin: 14px 0 6px; font: 500 15px/1.2 var(--font-playfair), "Playfair Display", serif; }
+.review-flag { display: flex; align-items: center; gap: 10px; justify-content: space-between; margin: 6px 0 10px; padding: 8px 10px; font-size: 11px; background: #fbf5e6; border: 1px solid #d8b46a; border-radius: 4px; }
+.upload-status, .hint { overflow-wrap: anywhere; }
+.notice-actions button.secondary { margin-left: 0; }
+
+/* --- decision statuses, garment choice, ready-for-review --- */
+.source-pill.uncertain { background:#fbe9d9; color:#8a4b12; }
+.source-pill.measure { background:#e3e9f4; color:#2f4a7a; }
+.dot.uncertain { background:#c97b2b; }
+.dot.measure { background:#3d5f9e; }
+.observation-controls { display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
+.obs-static { margin:2px 0 0; font-size:13px; color:var(--muted); }
+.reference-only { opacity:.75; }
+.ref-only { font:400 11px "DM Sans",sans-serif; color:var(--muted); }
+.ready-review { display:grid; gap:10px; padding:12px; border:1px solid #d8b46a; background:#fbf5e6; border-radius:4px; font-size:12px; }
+.ready-review ul { margin:4px 0 0; padding-left:18px; color:var(--muted); }
+.ready-review b { font-size:12px; }
+.notice-actions select { padding:8px 10px; border:1px solid var(--line, #ddd6c8); border-radius:4px; background:#fff; font:inherit; }
+.doc-section textarea { height:auto; min-height:0; resize:none; overflow:hidden; }

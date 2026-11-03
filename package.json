@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "format": "oxfmt",
     "test": "tsx --test tests/*.test.ts",
-    "smoke:live": "tsx --env-file=.env.local scripts/smoke-live.ts"
+    "smoke:live": "tsx --env-file=.env.local scripts/smoke-live.ts",
+    "test:e2e": "node e2e/build.mjs && tsx --test e2e/upload.e2e.ts"
   },
   "dependencies": {
     "lucide-react": "^1.61.0",
@@ -22,7 +23,9 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "esbuild": "^0.25.0",
     "oxfmt": "^0.2.0",
+    "playwright": "^1.50.0",
     "tailwindcss": "^4.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"

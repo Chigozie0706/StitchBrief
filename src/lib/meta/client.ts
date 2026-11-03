@@ -16,8 +16,21 @@ export class MetaApiError extends Error {
   }
 }
 
+/** Token usage as reported by the API (all fields optional: `usage` itself is optional in Meta's response). */
+export type TokenUsage = { promptTokens?: number; completionTokens?: number; reasoningTokens?: number; totalTokens?: number };
+/** Facts about one model call. Numbers and enum-like strings only: never message content. */
+export type CallMeta = { finishReason: string | null; usage: TokenUsage; responseId?: string };
+export type AttemptOutcome = "ok" | "invalid_output" | "truncated" | "content_filtered" | "refused" | "empty" | "not_json";
+/** One model attempt, safe to log. Contains no prompt, image, description or model output. */
+export type AttemptRecord = {
+  op: string; attempt: number; model: string; outcome: AttemptOutcome;
+  finishReason: string | null; usage: TokenUsage; ms: number; responseId?: string; error?: string;
+  /** True when this attempt carried an explanation of why the previous attempt was rejected. */
+  retryHint?: boolean;
+};
+
 export class ModelOutputError extends Error {
-  constructor(message: string) {
+  constructor(message: string, public kind: Exclude<AttemptOutcome, "ok"> = "invalid_output", public attempts: AttemptRecord[] = []) {
     super(message);
     this.name = "ModelOutputError";
   }
@@ -50,6 +63,8 @@ export type ChatJsonOptions = {
   maxRetries?: number;
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+  /** Called for every HTTP 200 response, before its content is checked, with finish_reason and token usage. */
+  onCall?: (meta: CallMeta) => void;
 };
 
 /** Maps an upstream failure to a message that is safe to show users. Never includes secrets. */
@@ -78,6 +93,24 @@ export function toMetaError(status: number, body: unknown): MetaApiError {
     default:
       return new MetaApiError(status >= 500 ? 502 : status, code, "The model API is temporarily unavailable.", status >= 500);
   }
+}
+
+type ChatResponse = {
+  id?: unknown;
+  choices?: { message?: { content?: unknown; refusal?: unknown }; finish_reason?: string }[];
+  usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; total_tokens?: unknown; completion_tokens_details?: { reasoning_tokens?: unknown } };
+};
+const count = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined);
+
+/** Extracts only numbers and the finish reason (Meta: CompletionUsage). Missing fields stay missing, never 0. */
+export function readCallMeta(json: ChatResponse): CallMeta {
+  const u = json.usage;
+  const usage: TokenUsage = {};
+  const fields: [keyof TokenUsage, unknown][] = [["promptTokens", u?.prompt_tokens], ["completionTokens", u?.completion_tokens], ["reasoningTokens", u?.completion_tokens_details?.reasoning_tokens], ["totalTokens", u?.total_tokens]];
+  for (const [k, v] of fields) { const n = count(v); if (n !== undefined) usage[k] = n; }
+  const reason = json.choices?.[0]?.finish_reason;
+  const id = typeof json.id === "string" ? json.id.replace(/[^\w.:-]/g, "").slice(0, 64) : "";
+  return { finishReason: typeof reason === "string" ? reason : null, usage, ...(id ? { responseId: id } : {}) };
 }
 
 function stripFences(s: string): string {
@@ -132,17 +165,18 @@ export async function chatJson(opts: ChatJsonOptions): Promise<unknown> {
         }
         throw err;
       }
-      const json = (await res.json()) as { choices?: { message?: { content?: unknown; refusal?: unknown }; finish_reason?: string }[] };
+      const json = (await res.json()) as ChatResponse;
       const choice = json.choices?.[0];
-      if (choice?.finish_reason === "length") throw new ModelOutputError("The model response was cut off before it finished.");
-      if (choice?.finish_reason === "content_filter") throw new ModelOutputError("The model's safety filter blocked this response.");
+      try { opts.onCall?.(readCallMeta(json)); } catch { /* diagnostics must never break a request */ }
+      if (choice?.finish_reason === "length") throw new ModelOutputError("The model response was cut off before it finished.", "truncated");
+      if (choice?.finish_reason === "content_filter") throw new ModelOutputError("The model's safety filter blocked this response.", "content_filtered");
       const content = choice?.message?.content;
-      if (typeof choice?.message?.refusal === "string" && choice.message.refusal.trim() && !content) throw new ModelOutputError("The model declined this request.");
-      if (typeof content !== "string" || !content.trim()) throw new ModelOutputError("The model returned an empty response.");
+      if (typeof choice?.message?.refusal === "string" && choice.message.refusal.trim() && !content) throw new ModelOutputError("The model declined this request.", "refused");
+      if (typeof content !== "string" || !content.trim()) throw new ModelOutputError("The model returned an empty response.", "empty");
       try {
         return JSON.parse(stripFences(content));
       } catch {
-        throw new ModelOutputError("The model returned text that was not valid JSON.");
+        throw new ModelOutputError("The model returned text that was not valid JSON.", "not_json");
       }
     } catch (e) {
       if (e instanceof MetaApiError || e instanceof ModelOutputError) throw e;

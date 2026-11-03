@@ -1,121 +1,106 @@
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { handleAnalyze, handleClarify, handleGenerate } from "../src/lib/server/handlers";
-import { createLiveProvider } from "../src/lib/server/provider";
+import { createLiveProvider, mockProvider } from "../src/lib/server/provider";
 import { _resetRateLimit } from "../src/lib/server/rate-limit";
 import { loadDrafts, saveDraft } from "../src/lib/storage";
-import { briefToSections } from "../src/lib/brief";
-import { GENERATE_SYSTEM, ANALYZE_SYSTEM } from "../src/lib/meta/prompts";
+import { answersKey } from "../src/lib/clarify";
+import { confirmDecision, markUncertain } from "../src/lib/decisions";
+import { ANALYZE_SYSTEM, CLARIFY_SYSTEM, GENERATE_SYSTEM } from "../src/lib/meta/prompts";
 import { completion, goodAnalyzeBody, liveAnalysisJson, liveBriefJson, stubFetch } from "./helpers";
-import type { Question, SavedBrief } from "../src/lib/types";
+import type { Observation, Question, SavedBrief } from "../src/lib/types";
 
 const config = { apiKey: "LLM_1_k", model: "muse-spark-1.3", baseUrl: "https://api.meta.ai/v1" };
 const post = (b: unknown) => new Request("http://x/api", { method: "POST", body: JSON.stringify(b) });
 const userText = (init: RequestInit) => (JSON.parse(init.body as string).messages[1].content as { type: string; text?: string }[]).find((p) => p.type === "text")!.text!;
+beforeEach(() => _resetRateLimit());
 
-test("end-to-end workflow with a stubbed model: ambiguity -> questions -> preserved answers -> brief -> revision", async () => {
-  _resetRateLimit();
-  const stub = stubFetch([
-    { json: completion(liveAnalysisJson) },
-    { json: completion({ questions: [liveAnalysisJson.questions[0], { id: "lining", question: "Should it be lined?", reason: "Opacity.", type: "single_select", options: ["Fully lined", "Unlined"], required: false }] }) },
-    { json: completion(liveBriefJson) },
-    { json: completion({ ...liveBriefJson, title: "Revised" }) },
-  ]);
+test("workflow: ledger reaches the model — answered, skipped, designer-corrected and carried-over decisions each keep their status; a revision changes only what changed", async () => {
+  const stub = stubFetch([{ json: completion(liveAnalysisJson) }, { json: completion({ questions: [] }) }, { json: completion(liveBriefJson) }, { json: completion({ ...liveBriefJson, title: "Revised" }) }]);
   const provider = createLiveProvider(config, stub.fn);
-
-  // 1. analyze: ambiguity is surfaced as low-confidence/unknown observations + targeted questions
   const a = (await (await handleAnalyze(post(goodAnalyzeBody()), provider)).json()).data;
-  assert.ok(a.observations.some((o: { source: string; confidence: string }) => o.source === "unknown" || o.confidence === "low"), "ambiguous details flagged");
-  assert.ok(a.questions.length >= 2 && a.questions.every((q: Question) => q.reason.length > 0), "each question explains why it matters");
-  assert.ok(a.missing_information.length > 0, "missing info returned by API");
+  assert.ok(a.observations.some((o: Observation) => o.status === "uncertain" || o.status === "unknown"), "ambiguity is surfaced as uncertain/unknown details");
+  assert.ok(a.questions.every((q: Question) => q.reason.length > 0 && q.topic));
+  assert.ok(a.missing_information.length > 0);
 
-  // 2. designer answers one, skips one, and corrects an observation (-> client_confirmed)
   let questions: Question[] = a.questions.map((q: Question) => (q.id === "fit" ? { ...q, answer: "Fitted" } : { ...q, skipped: true }));
-  const observations = a.observations.map((o: { key: string }) => (o.key === "neckline" ? { ...o, value: "Raised V, 2cm higher", source: "client_confirmed", confidence: "high" } : o));
-  const ctx = { ...goodAnalyzeBody(), image: undefined, observations };
+  const observations: Observation[] = a.observations.map((o: Observation) => (o.key === "silhouette" ? confirmDecision(o, "A-line") : o.key === "sleeves" ? markUncertain(o) : o));
+  const ctx = { ...goodAnalyzeBody(), image: undefined, observations, differences: a.differences, requested: ["Dress"] };
 
-  // 3. clarify: answers are sent to the model; repeated questions are dropped; only the new one comes back
-  const c = (await (await handleClarify(post({ ...ctx, questions }), provider)).json()).data.questions;
-  assert.deepEqual(c.map((q: Question) => q.id), ["lining"]);
-  assert.match(userText(stub.calls[1].init), /\[fit\].*\n\s+status: ANSWERED: Fitted/);
-  assert.match(userText(stub.calls[1].init), /\[changes\].*\n\s+status: SKIPPED/);
-  questions = [...questions, { ...c[0], answer: "Fully lined" }];
+  await handleClarify(post({ ...ctx, questions }), provider);
+  const clarifyText = userText(stub.calls[1].init);
+  assert.match(clarifyText, /- fit \(answered\)/);
+  assert.match(clarifyText, /- changes \(skipped\)/);
+  assert.match(clarifyText, /CLIENT-CONFIRMED \(Dress\) Silhouette: A-line/);
 
-  // 4. generate: every answer, the skip, and the designer's correction reach the model
-  const g1 = await (await handleGenerate(post({ ...ctx, questions }), provider)).json();
+  await handleGenerate(post({ ...ctx, questions }), provider);
   const t1 = userText(stub.calls[2].init);
-  assert.match(t1, /ANSWERED: Fitted/); assert.match(t1, /ANSWERED: Fully lined/); assert.match(t1, /SKIPPED/);
-  assert.match(t1, /Neckline: Raised V, 2cm higher \(source: client_confirmed, confidence: high\)/);
-  assert.equal(g1.data.brief.title, "Burgundy evening dress");
-  assert.equal(briefToSections(g1.data.brief).length, 12);
-  assert.match(GENERATE_SYSTEM, /None confirmed/); assert.match(GENERATE_SYSTEM, /never infer measurements/);
-  assert.match(ANALYZE_SYSTEM, /Never state exact measurements/);
+  assert.match(t1, /\[q:fit\] CLIENT-CONFIRMED Fit: Fitted/);
+  assert.match(t1, /\[q:changes\] UNKNOWN Changes: Changes from reference\? — Skipped by the designer/);
+  assert.match(t1, /\[obs:Dress:silhouette\] CLIENT-CONFIRMED \(Dress\) Silhouette: A-line/);
+  assert.match(t1, /\[obs:Dress:sleeves\] UNCERTAIN \(Dress\) Sleeves: Sleeveless — Marked uncertain by the designer/);
+  assert.match(t1, /Neckline: A higher neckline \(reference: Draped V neckline\)/, "the client's change replaces the reference detail in the ledger");
+  assert.doesNotMatch(t1, /Draped V\b(?! neckline)/, "no contradictory second version of the neckline");
+  assert.match(t1, /Garments to create: Dress/);
 
-  // 5. revision: change an answer, regenerate -> new answer is sent and the old one is not
+  // revision: change the answer, regenerate
   questions = questions.map((q) => (q.id === "fit" ? { ...q, answer: "Relaxed" } : q));
   const g2 = await (await handleGenerate(post({ ...ctx, questions }), provider)).json();
   const t2 = userText(stub.calls[3].init);
-  assert.match(t2, /ANSWERED: Relaxed/); assert.doesNotMatch(t2, /ANSWERED: Fitted/);
+  assert.match(t2, /Fit: Relaxed/);
+  assert.doesNotMatch(t2, /Fit: Fitted/);
   assert.equal(g2.data.brief.title, "Revised");
+  assert.match(g2.data.sections.find((s: { kind: string }) => s.kind === "confirmed").body, /Fit: Relaxed/);
 });
 
-test("manual edits + answers survive save/reload (the editor revision path)", () => {
+test("system prompts carry the rules that cannot be enforced in code", () => {
+  assert.match(ANALYZE_SYSTEM, /never invent differences/);
+  assert.match(ANALYZE_SYSTEM, /A garment being visible does not mean the client wants it made/);
+  assert.match(ANALYZE_SYSTEM, /never ask about something the client's description already states/);
+  assert.match(CLARIFY_SYSTEM, /single follow-up round/);
+  assert.match(CLARIFY_SYSTEM, /A skipped question stays skipped/);
+  assert.match(GENERATE_SYSTEM, /Do NOT restate or re-list confirmed decisions/);
+  assert.match(GENERATE_SYSTEM, /never state or imply a fabric is chosen, approved or has a composition/);
+  assert.match(GENERATE_SYSTEM, /Do not write any number unless it appears in the ledger/);
+  assert.match(GENERATE_SYSTEM, /flare or panel proportions may need redesign/);
+});
+
+test("drafts keep decisions, answers, review flags and the garment choice across save/reload; edits survive", () => {
   const mem = new Map<string, string>();
   const store = { getItem: (k: string) => mem.get(k) ?? null, setItem: (k: string, v: string) => void mem.set(k, v) };
-  const sections = briefToSections(liveBriefJson as never);
-  const base: SavedBrief = { id: "d1", title: "T", updated: "", status: "Draft", image: "", sections, updatedAt: new Date().toISOString(), questions: [{ id: "fit", question: "q", reason: "r", type: "text", options: [], required: false, answer: "Fitted" }] };
+  const obs = markUncertain({ piece: "Dress", key: "neckline", label: "Neckline", value: "Square", status: "observed", origin: "image" } as Observation);
+  const base: SavedBrief = {
+    id: "d1", title: "T", updated: "", status: "Draft", image: "", updatedAt: new Date().toISOString(), requested: ["Dress"],
+    sections: [{ title: "Garment overview", body: "orig", kind: "overview" }], observations: [obs],
+    questions: [{ id: "fit", question: "q", reason: "r", type: "text", options: [], priority: "normal", topic: "fit", piece: "", answer: "Fitted", needsReview: true, round: 2 }],
+  };
   saveDraft(base, store);
-  const edited = sections.map((s, i) => (i === 0 ? { ...s, body: "Designer rewrote this" } : s));
-  saveDraft({ ...base, title: "T v2", sections: edited, status: "Ready" }, store);
+  saveDraft({ ...base, title: "T v2", status: "Ready", sections: [{ ...base.sections![0], body: "Designer rewrote this" }] }, store);
   const [d] = loadDrafts(store);
   assert.equal(loadDrafts(store).length, 1);
   assert.equal(d.sections![0].body, "Designer rewrote this");
-  assert.equal(d.questions![0].answer, "Fitted");
+  assert.deepEqual([d.observations![0].status, d.observations![0].previousStatus], ["uncertain", "observed"], "Mark as uncertain survives a reload and stays reversible");
+  assert.deepEqual([d.questions![0].needsReview, d.questions![0].round], [true, 2]);
+  assert.deepEqual(d.requested, ["Dress"]);
   assert.equal(d.status, "Ready");
 });
 
-import { answersKey } from "../src/lib/clarify";
-import { parseAnalysisResult, parseClarifyRequest, parseDifferences } from "../src/lib/validation";
-import { mockProvider } from "../src/lib/server/provider";
-
-test("differences: validated from model output, optional in requests, and passed to clarify + generate prompts", async () => {
-  _resetRateLimit();
-  // required in model output (schema says required) and strictly validated
-  assert.equal(parseAnalysisResult(liveAnalysisJson).ok, true);
-  const { differences: _d, ...without } = liveAnalysisJson;
-  assert.equal(parseAnalysisResult(without).ok, false);
-  assert.equal(parseAnalysisResult({ ...liveAnalysisJson, differences: [{ topic: "x" }] }).ok, false);
-  assert.equal(parseAnalysisResult({ ...liveAnalysisJson, differences: [] }).ok, true);
-  assert.equal(parseDifferences(new Array(9).fill(liveAnalysisJson.differences[0])).ok, false);
-  // older clients that omit it still work
-  const base = { ...goodAnalyzeBody(), image: undefined, observations: liveAnalysisJson.observations, questions: [] };
-  const parsed = parseClarifyRequest(base);
-  assert.equal(parsed.ok && parsed.value.differences.length, 0);
-
-  const stub = stubFetch([{ json: completion({ questions: [] }) }, { json: completion(liveBriefJson) }]);
-  const provider = createLiveProvider(config, stub.fn);
-  const body = { ...base, differences: liveAnalysisJson.differences };
-  await handleClarify(post(body), provider);
-  await handleGenerate(post(body), provider);
-  for (const i of [0, 1]) assert.match(userText(stub.calls[i].init), /Neckline: reference shows "Draped V neckline"; client wants "A higher neckline"/);
-  assert.match(GENERATE_SYSTEM, /client_confirmed_modifications/);
-  assert.match(ANALYZE_SYSTEM, /never invent differences/);
+test("stale detection covers answers, skips, observation status, differences and the garment choice", () => {
+  const q = (over: Partial<Question> = {}): Question => ({ id: "fit", question: "q", reason: "r", type: "text", options: [], priority: "normal", topic: "fit", piece: "", answer: "Fitted", ...over });
+  const obs = liveAnalysisJson.observations as unknown as Observation[];
+  const diffs = liveAnalysisJson.differences;
+  const k = answersKey([q()], obs, diffs, ["Dress"]);
+  assert.equal(answersKey([q({ answer: " Fitted " })], obs, diffs, ["Dress"]), k);
+  assert.notEqual(answersKey([q({ answer: "Relaxed" })], obs, diffs, ["Dress"]), k);
+  assert.notEqual(answersKey([q({ answer: undefined, skipped: true })], obs, diffs, ["Dress"]), k);
+  assert.notEqual(answersKey([q({ needsReview: true })], obs, diffs, ["Dress"]), k);
+  assert.notEqual(answersKey([q()], [markUncertain(obs[0]), ...obs.slice(1)], diffs, ["Dress"]), k, "marking a detail uncertain makes the brief stale");
+  assert.notEqual(answersKey([q()], obs, [], ["Dress"]), k);
+  assert.notEqual(answersKey([q()], obs, diffs, ["Dress", "Jeans"]), k);
 });
 
-test("mock mode never fabricates differences", async () => {
+test("mock mode never fabricates differences or observed details", async () => {
   const a = await mockProvider.analyze({ ...goodAnalyzeBody() } as never);
   assert.deepEqual(a.differences, []);
-});
-
-test("stale detection: any answer, skip, observation or difference change alters the key; identical state does not", () => {
-  const q = (over: Partial<Question> = {}): Question => ({ id: "fit", question: "q", reason: "r", type: "text", options: [], required: false, answer: "Fitted", ...over });
-  const obs = liveAnalysisJson.observations as never[];
-  const diffs = liveAnalysisJson.differences;
-  const k = answersKey([q()], obs, diffs);
-  assert.equal(answersKey([q()], obs, diffs), k, "same inputs -> same key");
-  assert.equal(answersKey([q({ answer: " Fitted " })], obs, diffs), k, "whitespace is not a change");
-  assert.notEqual(answersKey([q({ answer: "Relaxed" })], obs, diffs), k);
-  assert.notEqual(answersKey([q({ answer: undefined, skipped: true })], obs, diffs), k);
-  assert.notEqual(answersKey([q()], [{ ...(obs[0] as object), value: "edited" }] as never, diffs), k);
-  assert.notEqual(answersKey([q()], obs, []), k);
+  assert.ok(a.observations.every((o) => o.status !== "observed"));
 });

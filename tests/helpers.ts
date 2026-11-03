@@ -6,31 +6,46 @@ export const GIF = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
 
 export const goodAnalyzeBody = (image = JPEG) => ({ image, description: "A burgundy evening dress with a higher neckline", garment: "Dress", occasion: "Reception" });
 
+type Status = "observed" | "client_confirmed" | "ai_suggested" | "uncertain" | "unknown" | "needs_measurement";
+type Origin = "image" | "client_description" | "ai";
+/** A model-style observation (reason/note present, as the strict schema requires). */
+export const ob = (piece: string, key: string, value: string, status: Status = "observed", origin: Origin = "image", reason = "") =>
+  ({ piece, key, label: key.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase()), value, status, origin, reason, note: "" });
+export const qn = (id: string, question: string, over: Record<string, unknown> = {}) =>
+  ({ id, question, reason: "Matters for the brief.", type: "text", options: [], priority: "normal", topic: id, piece: "", ...over });
+export const choice = (id: string, question: string, options: string[], over: Record<string, unknown> = {}) => qn(id, question, { type: "single_select", options, ...over });
+
 export const liveAnalysisJson = {
   summary: "Long burgundy dress.",
+  garments: [{ name: "Dress", type: "dress" }],
   observations: [
-    { key: "garment_category", label: "Garment category", value: "Dress", source: "observed", confidence: "high", note: "" },
-    { key: "silhouette", label: "Silhouette", value: "Column", source: "observed", confidence: "medium", note: "" },
-    { key: "neckline", label: "Neckline", value: "Draped V", source: "observed", confidence: "medium", note: "" },
-    { key: "sleeves", label: "Sleeves", value: "Sleeveless", source: "observed", confidence: "high", note: "" },
-    { key: "length_category", label: "Length", value: "Full length", source: "observed", confidence: "medium", note: "" },
-    { key: "design_details", label: "Design details", value: "Not visible", source: "unknown", confidence: "low", note: "" },
-    { key: "color", label: "Color", value: "Deep burgundy", source: "observed", confidence: "high", note: "" },
-    { key: "fabric_appearance", label: "Fabric appearance", value: "Fluid with soft sheen (visual impression)", source: "ai_suggestion", confidence: "low", note: "" },
-    { key: "construction_considerations", label: "Construction", value: "Toile recommended", source: "ai_suggestion", confidence: "medium", note: "" },
+    ob("Dress", "garment_category", "Dress"),
+    ob("Dress", "silhouette", "Column"),
+    ob("Dress", "neckline", "Draped V"),
+    ob("Dress", "sleeves", "Sleeveless"),
+    ob("Dress", "length_category", "Full length"),
+    ob("Dress", "design_details", "Not visible", "unknown"),
+    ob("Dress", "color", "Deep burgundy"),
+    ob("Dress", "fabric_appearance", "Fluid with soft sheen (visual impression)", "uncertain", "image", "Sheen is hard to judge in a photo"),
+    ob("Dress", "construction_considerations", "Toile recommended", "ai_suggested", "ai"),
   ],
   missing_information: ["Fit", "Fabric"],
   differences: [{ topic: "Neckline", reference_shows: "Draped V neckline", client_wants: "A higher neckline" }],
-  questions: [
-    { id: "fit", question: "How should it fit?", reason: "Drives ease.", type: "single_select", options: ["Fitted", "Relaxed"], required: true },
-    { id: "changes", question: "Changes from reference?", reason: "Differences matter.", type: "text", options: [], required: false },
-  ],
+  questions: [choice("fit", "How should it fit?", ["Fitted", "Relaxed"], { priority: "high", topic: "fit" }), qn("changes", "Changes from reference?", { topic: "changes" })],
 };
 
 export const liveBriefJson = {
-  title: "Burgundy evening dress", garment_overview: "o", silhouette_and_fit: "s", neckline_and_sleeves: "n", length: "l",
-  fabric_and_materials: "f", color_and_finishing: "c", construction_considerations: "k", client_confirmed_modifications: "None confirmed.",
-  measurements_required: ["Bust"], assumptions_and_uncertainties: ["Fabric unconfirmed"], open_questions: ["Fabric?"], final_review_checklist: ["Review toile"],
+  title: "Burgundy evening dress",
+  garment_overview: "Long burgundy dress for a reception.",
+  shared_requirements: "",
+  pieces: [{
+    name: "Dress", fit_and_comfort: "Relaxed fit.", fabric_preferences: "Fluid drape preferred.", construction_and_finishing: "Concealed zip suggested.",
+    body_measurements: ["Bust", "Waist", "Full hip"], garment_dimensions: ["Finished length"], changes_from_reference: ["Higher neckline"],
+  }],
+  ai_suggestions: ["Consider a toile fitting"],
+  unresolved: [],
+  technical_gaps: [],
+  review_checklist: ["Review toile"],
 };
 
 /** Builds a fetch stub returning the given Chat Completions-style responses in order. */

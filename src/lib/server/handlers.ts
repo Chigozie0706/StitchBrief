@@ -1,6 +1,9 @@
+import { assembleBrief, buildLedger, confirmedTopics } from "../assemble";
+import { dedupeQuestions, followupUsed } from "../clarify";
 import { LIMITS } from "../config";
 import { listModels, MetaApiError, ModelOutputError, readMetaConfig } from "../meta/client";
 import { parseAnalyzeRequest, parseClarifyRequest, parseGenerateRequest, type Result } from "../validation";
+import { sha256Hex } from "../hash";
 import { getProvider, type BriefProvider } from "./provider";
 import { rateLimit } from "./rate-limit";
 
@@ -44,7 +47,7 @@ function mapFailure(e: unknown): Response {
 function make<Req, Res>(
   parse: (body: unknown) => Result<Req>,
   run: (p: BriefProvider, r: Req) => Promise<Res>,
-  wrap: (res: Res) => unknown,
+  wrap: (res: Res, req: Req) => unknown | Promise<unknown>,
 ): Handler {
   return async (req, provider = getProvider()) => {
     const rl = rateLimit(clientKey(req));
@@ -56,16 +59,41 @@ function make<Req, Res>(
     if (!parsed.ok) return err(400, "invalid_request", parsed.error);
     try {
       const out = await run(provider, parsed.value);
-      return Response.json({ ok: true, provider: provider.mode, model: provider.model, data: wrap(out) });
+      return Response.json({ ok: true, provider: provider.mode, model: provider.model, data: await wrap(out, parsed.value) });
     } catch (e) {
       return mapFailure(e);
     }
   };
 }
 
-export const handleAnalyze = make(parseAnalyzeRequest, (p, r) => p.analyze(r), (d) => d);
-export const handleClarify = make(parseClarifyRequest, (p, r) => p.clarify(r), (questions) => ({ questions }));
-export const handleGenerate = make(parseGenerateRequest, (p, r) => p.generate(r), (brief) => ({ brief }));
+// The server hashes the exact bytes it received; the client compares with its own hash to prove the right image was analysed.
+export const handleAnalyze = make(
+  parseAnalyzeRequest,
+  async (p, r) => {
+    const a = await p.analyze(r);
+    // Never ask about something the client's own description already settles, or about the same decision twice.
+    const settled = confirmedTopics(buildLedger({ observations: a.observations, questions: [], differences: a.differences }));
+    return { ...a, questions: dedupeQuestions([], a.questions, 5, settled).map((q) => ({ ...q, round: 1 as const })) };
+  },
+  async (d, r) => ({ ...d, imageHash: await sha256Hex(r.image) }),
+);
+
+// One initial round + ONE follow-up round. Once round 2 exists, the model is not consulted again.
+export const handleClarify = make(
+  parseClarifyRequest,
+  async (p, r) => {
+    if (followupUsed(r.questions)) return [];
+    const proposed = await p.clarify(r);
+    return dedupeQuestions(r.questions, proposed, LIMITS.MAX_NEW_QUESTIONS, confirmedTopics(buildLedger(r))).map((q) => ({ ...q, round: 2 as const }));
+  },
+  (questions) => ({ questions }),
+);
+
+export const handleGenerate = make(
+  parseGenerateRequest,
+  async (p, r) => ({ brief: await p.generate(r), ledger: buildLedger(r) }),
+  async ({ brief, ledger }, r) => ({ brief, ...assembleBrief(brief, ledger, r), imageHash: r.image ? await sha256Hex(r.image) : null }),
+);
 
 /** GET /api/health[?verify=1] — reports configuration without exposing the key. */
 export async function handleHealth(req: Request, env: Record<string, string | undefined> = process.env, fetchImpl: typeof fetch = fetch): Promise<Response> {
