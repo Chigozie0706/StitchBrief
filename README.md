@@ -1,5 +1,93 @@
 # StitchBrief
 
+## What StitchBrief does
+
+StitchBrief helps independent fashion designers and tailors turn client inspiration images and informal descriptions into structured garment briefs.
+
+Instead of treating an inspiration image as a complete specification, StitchBrief guides the user through a process of visual analysis, clarification and brief generation.
+
+### Workflow
+
+1. **Create a brief:** Upload a garment reference image, describe the client's request, and select the garment type and occasion.
+2. **Analyse the reference:** Meta Muse Spark analyses the image alongside the client's description and identifies visible design characteristics.
+3. **Clarify decisions:** The application identifies missing, ambiguous or conflicting information and asks targeted follow-up questions.
+4. **Generate the brief:** Client responses and validated observations are assembled into an editable garment brief.
+5. **Review:** The designer reviews confirmed decisions, unresolved questions, unknown details and measurements that still need to be collected.
+
+### Design principles
+
+- Visual observations are not treated as client approval.
+- AI suggestions are not presented as confirmed requirements.
+- Exact measurements are never inferred from photographs.
+- Fabric appearance is not treated as proof of physical fabric composition.
+- Unresolved decisions remain visible instead of being silently filled with assumptions.
+- The generated document is a starting point for tailor review, not an automatic sewing pattern or production specification.
+
+## Technology stack
+
+| Technology | Purpose |
+|---|---|
+| Next.js 16 | Application framework and API routes |
+| React 19 | User interface |
+| TypeScript | Application logic and type safety |
+| Tailwind CSS v4 | Styling |
+| Meta Model API | Multimodal image and text analysis |
+| Muse Spark 1.3 | AI model |
+| Playwright | Browser-based end-to-end testing |
+| pnpm | Package management |
+
+## Environment variables
+
+Configure the following variables in `.env.local`:
+
+| Variable | Purpose |
+|---|---|
+| `MODEL_API_KEY` | Server-side Meta Model API key |
+| `META_MODEL` | Meta model identifier; defaults to `muse-spark-1.3` |
+| `MOCK_MODE` | Enables deterministic mock responses when set to `true` |
+| `META_REASONING_EFFORT` | Configures the model's reasoning effort |
+
+Never expose `MODEL_API_KEY` in client-side code or commit it to version control.
+
+## Testing
+
+The project includes unit tests and real-browser end-to-end tests.
+
+```bash
+pnpm test
+pnpm test:e2e
+pnpm typecheck
+pnpm build
+```
+
+The end-to-end suite uses the real application and API handlers with the Meta API stubbed, so it does not require live model access.
+
+For a live API verification, configure `MODEL_API_KEY` and run:
+
+```bash
+pnpm smoke:live ./outfit.jpg "Client wants this dress with a higher neckline"
+```
+
+## Deployment
+
+The application is deployed at:
+
+https://stitchbrief.vercel.app/
+
+For production deployments, configure the required environment variables in the hosting provider's environment settings. Keep API credentials server-side and use live mode when Meta Model API access is configured.
+
+## Repository
+
+GitHub: https://github.com/Chigozie0706/StitchBrief
+
+## Project status
+
+StitchBrief was developed for the Meta Global AI Developer Hackathon.
+
+The current implementation demonstrates an end-to-end workflow for converting garment inspiration into a structured, editable brief, with Meta Muse Spark powering the multimodal analysis and clarification process.
+
+The project is an MVP. Authentication, persistent database storage and production-grade distributed rate limiting are not currently implemented.
+
 Next.js 16 (App Router) + React 19 + Tailwind v4, with a server-side Meta Model API integration.
 
 ```bash
